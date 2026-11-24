@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>KINGDOMS PARTY</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- ====== LOBBY OVERLAY ====== -->
+  <div id="lobby" class="overlay">
+    <div class="panel lobby-panel">
+      <h1 class="title">👑 KINGDOMS <span>PARTY</span></h1>
+      <p class="subtitle">مملكة صغيرة… ومسابقة ودية مع أصحابك</p>
+      <div class="card">
+        <label>اسم مملكتك</label>
+        <input id="player-name" type="text" maxlength="20" placeholder="مملكة النخلة الذهبية…">
+      </div>
+      <div class="card">
+        <label>أنشئ غرفة جديدة</label>
+        <button id="btn-create" class="btn primary">⚔️ إنشاء غرفة</button>
+        <div class="or">أو</div>
+        <label>انضم برمز الغرفة</label>
+        <div class="row">
+          <input id="join-code" type="text" maxlength="8" placeholder="AB12CD34" spellcheck="false" autocapitalize="characters">
+          <button id="btn-join" class="btn">انضم</button>
+        </div>
+      </div>
+      <button id="btn-howto" class="btn ghost">📖 كيف ألعب؟</button>
+      <div id="lobby-error" class="error hidden"></div>
+    </div>
+
+    <div id="howto-modal" class="hidden">
+      <div class="panel card howto">
+        <h2>📖 كيف ألعب؟</h2>
+        <ul>
+          <li>اسحب للتحرك في الخريطة، وعجلة الفأرة أو قرصة الأصابع للتكبير.</li>
+          <li>اسحب رسمة تحديد فوق العمال لاختيارهم (أو انقر على عامل).</li>
+          <li>انقر على شجرة/صخرة/منجم ليعمل العمال المحددون عليه.</li>
+          <li>العمال يعودون للقلعة ويحملون ثم يعودون تلقائياً — بدون مجهود منك.</li>
+          <li>من الأزرار السفلية يمكنك توزيع كل العمال الخاملين على مورد معين بضغطة.</li>
+          <li>شارك رمز الغرفة مع أصدقائك ليدخلوا نفس الخريطة.</li>
+        </ul>
+        <button id="btn-close-howto" class="btn">تمام!</button>
+      </div>
+    </div>
+
+    <!-- ====== ROOM SCREEN ====== -->
+    <div id="room-screen" class="hidden">
+      <div class="panel lobby-panel">
+        <h2>🚪 غرفة المباراة</h2>
+        <div class="card room-code-card">
+          <span>رمز الغرفة — شاركه مع أصدقائك:</span>
+          <div id="room-code-display" class="room-code">------</div>
+          <button id="btn-copy-code" class="btn small">📋 نسخ</button>
+        </div>
+        <div id="room-players"></div>
+        <div class="row">
+          <button id="btn-ready" class="btn">أنا جاهز</button>
+          <button id="btn-start" class="btn primary hidden">🚀 ابدأ المعاينة</button>
+        </div>
+        <div id="room-chat-wrap" class="card">
+          <div id="room-chat"></div>
+          <div class="row">
+            <input id="chat-input" type="text" maxlength="300" placeholder="اكتب رسالة…">
+            <button id="btn-chat-send" class="btn small">إرسال</button>
+          </div>
+        </div>
+        <button id="btn-leave-room" class="btn ghost">خروج</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== GAME HUD ====== -->
+  <canvas id="game"></canvas>
+
+  <div id="hud" class="hidden">
+    <div id="top-bar">
+      <div class="res"><span class="ico food">🍎</span><b id="res-food">0</b></div>
+      <div class="res"><span class="ico wood">🪵</span><b id="res-wood">0</b></div>
+      <div class="res"><span class="ico stone">🪨</span><b id="res-stone">0</b></div>
+      <div class="res"><span class="ico gold">💰</span><b id="res-gold">0</b></div>
+      <div class="res"><span class="ico bricks">🧱</span><b id="res-bricks">0</b></div>
+      <div class="res"><span class="ico">👷</span><b id="res-pop">0</b></div>
+      <div class="res storage"><span class="ico">📦</span><b id="res-cap">500</b></div>
+      <div id="age-badge">☀️ عصر القرية</div>
+    </div>
+
+    <div id="side-left">
+      <canvas id="minimap" width="144" height="144"></canvas>
+      <div id="players-list"></div>
+      <button id="btn-stats" class="btn small full">📊 إحصائيات الاقتصاد</button>
+    </div>
+
+    <div id="bottom-bar">
+      <div id="selection-info">اختر عاملاً…</div>
+      <div class="actions">
+        <button class="btn small" data-auto="tree">🪵 عمال → خشب</button>
+        <button class="btn small" data-auto="stone">🪨 عمال → حجر</button>
+        <button class="btn small" data-auto="gold">💰 عمال → ذهب</button>
+        <button class="btn small" data-auto="berry">🍎 عمال → طعام</button>
+        <button id="btn-unassign" class="btn small">✋ إيقاف المحددين</button>
+        <button id="btn-sel-all" class="btn small">✳️ كل العمال</button>
+      </div>
+      <div id="build-menu" class="hidden">
+        <div class="build-title">🏗️ البناء <button id="btn-cancel-build" class="btn small">✕ إلغاء</button></div>
+        <div id="build-buttons"></div>
+      </div>
+      <button id="btn-build-menu" class="btn small">🏗️ بناء</button>
+    </div>
+
+    <div id="building-panel" class="hidden">
+      <h3 id="bp-title">مبنى</h3>
+      <div id="bp-body" style="font-size:13px; margin-bottom:8px;"></div>
+      <button id="bp-train" class="btn primary small hidden">👷 درّب عاماً (50 🍎)</button>
+      <button id="bp-close" class="btn small">إغلاق</button>
+    </div>
+
+    <div id="stats-panel" class="hidden">
+      <h3>📊 إحصائيات الاقتصاد</h3>
+      <div id="stats-body"></div>
+      <button id="btn-close-stats" class="btn small">إغلاق</button>
+    </div>
+
+    <div id="connection-banner" class="hidden">⚠️ انقطع الاتصال… جاري إعادة المحاولة</div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

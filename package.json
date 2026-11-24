@@ -1,0 +1,15 @@
+{
+  "name": "kingdoms-party",
+  "version": "0.1.0",
+  "description": "KINGDOMS PARTY - 2D online cartoon RTS for the browser",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test test/sim.test.js test/net.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
