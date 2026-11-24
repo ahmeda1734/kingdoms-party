@@ -1,7 +1,7 @@
 // HUD: top resource bar, minimap, player list, selection info, stats panel,
 // build menu and building panel.
 
-import { MAP_W, MAP_H, T, TILE, RES_NAMES, BUILDING_DEF, BUILDING } from '../../shared/constants.js';
+import { MAP_W, MAP_H, T, TILE, RES_NAMES, BUILDING_DEF, BUILDING, UNIT, ROLE_DEF, TRAINABLE_ROLES, AGES, MAX_AGE } from '../../shared/constants.js';
 
 const TERRAIN_MINI = {
   [T.GRASS]: '#79c34f', [T.HILL]: '#63a53f', [T.SAND]: '#e7d79f',
@@ -39,9 +39,17 @@ export class UI {
       bpBody: document.getElementById('bp-body'),
       bpTrain: document.getElementById('bp-train'),
       bpClose: document.getElementById('bp-close'),
+      milMenu: document.getElementById('military-menu'),
+      milButtons: document.getElementById('military-buttons'),
+      btnMilMenu: document.getElementById('btn-mil-menu'),
+      btnCloseMil: document.getElementById('btn-close-mil'),
+      ageBadge: document.getElementById('age-badge'),
+      btnAgeUp: document.getElementById('btn-age-up'),
     };
     this.bstate = { selectedBuilding: null };
     this.toast = null;
+    this.trainOk = false;
+    this.buildMilitaryMenu();
     this.mctx = this.el.minimap.getContext('2d');
     this.miniBase = document.createElement('canvas');
     this.miniBase.width = MAP_W; this.miniBase.height = MAP_H;
@@ -56,11 +64,13 @@ export class UI {
     const order = [
       BUILDING.HOUSE, BUILDING.FARM, BUILDING.WAREHOUSE,
       BUILDING.LUMBERMILL, BUILDING.QUARRY, BUILDING.GOLDMINE_B, BUILDING.BRICKFACTORY,
+      BUILDING.BARRACKS, BUILDING.WATCHTOWER,
     ];
     const ICONS = {
       [BUILDING.HOUSE]: '🏠', [BUILDING.FARM]: '🌾', [BUILDING.WAREHOUSE]: '📦',
       [BUILDING.LUMBERMILL]: '🪚', [BUILDING.QUARRY]: '⛏️', [BUILDING.GOLDMINE_B]: '⛏️',
       [BUILDING.BRICKFACTORY]: '🧱',
+      [BUILDING.BARRACKS]: '⚔️', [BUILDING.WATCHTOWER]: '🗼',
     };
     const SHORT = { food: '🍎', wood: '🪵', stone: '🪨', gold: '💰', bricks: '🧱' };
     this.el.buildButtons.innerHTML = order.map(type => {
@@ -95,6 +105,74 @@ export class UI {
     this.el.buildMenu.classList.toggle('hidden', !on);
   }
 
+  setTrainButton(ok, reason) {
+    this.trainOk = ok;
+    this.el.bpTrain.disabled = !ok;
+    this.el.bpTrain.classList.toggle('cant', !ok);
+    this.el.bpTrain.title = reason || '';
+  }
+
+  trainButtonState() { return this.trainOk; }
+
+  // ---------- Phase 3: military training + ages ----------
+
+  buildMilitaryMenu() {
+    const SHORT = { food: '🍏', wood: '🪵', stone: '🧨', gold: '💰', bricks: '🧱' };
+    this.el.milButtons.innerHTML = TRAINABLE_ROLES.map(role => {
+      const def = ROLE_DEF[role];
+      const cost = Object.entries(def.cost).map(([r, v]) => `${SHORT[r]}${v}`).join(' ');
+      return `<button class="bbtn" data-role="${role}">
+        <span class="bi">${def.icon}</span><span class="bn">${def.name}</span>
+        <span class="bc">${cost}</span></button>`;
+    }).join('');
+    this.el.milButtons.querySelectorAll('[data-role]').forEach(b => {
+      b.addEventListener('click', () => this.onMilSelect?.(b.dataset.role));
+    });
+  }
+
+  // replaced by main.js
+  onMilSelect(role) {}
+
+  refreshRoleAffordability(stock, world) {
+    const pop = world.myPop();
+    this.el.milButtons.querySelectorAll('[data-role]').forEach(b => {
+      const def = ROLE_DEF[b.dataset.role];
+      const afford = Object.entries(def.cost).every(([r, v]) => (stock[r] ?? 0) >= v);
+      const from = def.from === 'barracks'
+        ? [...world.buildings.values()].some(x => x.owner === world.myPid
+            && x.type === BUILDING.BARRACKS && x.done <= x.now)
+        : true;
+      b.classList.toggle('cant', !afford || pop.units >= pop.cap || !from);
+    });
+  }
+
+  updateAgeUI() {
+    const age = Math.min(MAX_AGE, this.world.myAge ?? 1);
+    const cur = AGES[age];
+    const next = AGES[age + 1];
+    this.el.ageBadge.textContent = `${cur.icon} ${cur.name}`;
+    const btn = this.el.btnAgeUp;
+    if (!next) {
+      btn.textContent = '👑 أعلى عصر';
+      btn.disabled = true;
+      return;
+    }
+    const s = this.world.stockFor(this.world.myPid) ?? {};
+    const TERMS = { food: '🍏', wood: '🪵', gold: '💰' };
+    const cost = Object.entries(next.cost).filter(([r]) => r !== 'building')
+      .map(([r, v]) => `${TERMS[r] ?? ''}${v}`).join(' ');
+    btn.textContent = `⬆️ العصر التالي ${next.icon} (${cost})`;
+    const afford = Object.entries(next.cost).every(([r, v]) =>
+      r === 'building' ? true : (s[r] ?? 0) >= v);
+    const buildingOk = next.cost.building
+      ? [...this.world.buildings.values()].some(b => b.owner === this.world.myPid
+          && b.type === BUILDING.WATCHTOWER && b.done <= b.now)
+      : true;
+    btn.disabled = !(afford && buildingOk);
+    btn.title = next.cost.building && !buildingOk
+      ? 'يلزم فنا مراقبة مبنية' : '';
+  }
+
   // ---------- building panel ----------
 
   showBuildingPanel(b) {
@@ -111,6 +189,8 @@ export class UI {
     } else {
       this.el.bpBody.textContent = def.foodPerTick ? '🌟 تعمل: إنتاج طعام مستمر'
         : def.auraMult ? `🌟 تعمل: +${Math.round((def.auraMult - 1) * 100)}% جمع ${NODE_AR[def.auraNode] ?? ''} ضمن ${def.auraRadius} بلاطات`
+        : b.type === BUILDING.BARRACKS ? '⚔️ درّب الأدوار من قائمة «⚔️ قوات» السفلية'
+        : def.dmg ? '🎯 مرادف مدافع: يرصد بواسع ويقذف كل عدو في مداه'
         : def.bricksPerTick ? '🌟 اعمل العمال عليها لإنتاج الطابوق (يستهلك الحجر)'
         : def.depot ? '🌟 نقطة إيداع للموارد' : '';
       this.el.bpTrain.classList.add('hidden');
@@ -157,6 +237,8 @@ export class UI {
     this.el.cap.textContent = `${Math.floor(total)}/${cap}`;
     this.el.cap.parentElement.classList.toggle('storage-full', total >= cap);
     this.refreshAffordability(s);
+    this.refreshRoleAffordability(s, this.world);
+    this.updateAgeUI();
     this.refreshBuildingPanel(this.world);
   }
 
@@ -173,19 +255,32 @@ export class UI {
     const sel = this.world.selection;
     if (sel.size === 0) { this.el.selection.textContent = 'اختر عاملاً… (اسحب للتجول، انقر على مورد لتكليف العمال)'; return; }
     const tasks = {};
+    const roles = {};
+    let military = 0;
     for (const id of sel) {
       const w = this.world.myWorkers.get(id);
       if (!w) continue;
+      if (w.type && w.type !== UNIT.WORKER) {
+        military++;
+        const nm = ROLE_DEF[w.type]?.name ?? w.type;
+        roles[nm] = (roles[nm] ?? 0) + 1;
+        continue;
+      }
       const task = w.state === 'gather' ? ('يجمع ' + (RES_AR[w.carryType] ?? 'مورداً'))
         : w.state === 'toNode' ? 'يتجه للمورد'
         : w.state === 'toBuilding' ? 'يتجه إلى المعمل'
         : w.state === 'workFactory' ? 'يصنع الطابوق'
         : w.state === 'toDepot' ? 'يعيد الحمولة للمخزن'
+        : w.state === 'fight' ? 'يقاتل'
+        : w.state === 'flee' ? 'يهرب'
         : 'خامل';
       tasks[task] = (tasks[task] ?? 0) + 1;
     }
-    this.el.selection.textContent = `👷 عمال محددون: ${sel.size} — ` +
-      Object.entries(tasks).map(([t, n]) => `${n} ${t}`).join(' · ');
+    const breakdown = Object.entries(tasks).map(([t, n]) => `${n} ${t}`).join(' · ');
+    const roleBreak = Object.entries(roles).map(([r, n]) => `${n} ${r}`).join(' · ');
+    this.el.selection.textContent = military > 0
+      ? `⚔️ محددون: ${sel.size}${military < sel.size ? ' (' + (sel.size - military) + ' عمال)' : ''} — ` + roleBreak
+      : `👷 عمال محددون: ${sel.size} — ` + breakdown;
   }
 
   flashMsg(text) {

@@ -8,11 +8,13 @@ export const C2S = {
   CHAT: 'chat',               // { text }
   ASSIGN_WORKERS: 'assign',   // { workerIds, nodeId }  gather command
   UNASSIGN: 'unassign',       // { workerIds }          go idle
-  ORDER_MOVE: 'move',         // { workerIds, x, y }    world px
+  ORDER_MOVE: 'move',         // { workerIds, x, y }    world px (any own unit)
   AUTO_ASSIGN: 'auto',        // { type, count }        smart idle-worker dispatch
   BUILD: 'build',             // { type, x, y }         tile coords of top-left corner
   ASSIGN_TO_BUILDING: 'assignBuilding', // { workerIds, buildingId } (brickfactory)
   TRAIN_WORKER: 'trainWorker', // { }                  from the selected castle
+  TRAIN_UNIT: 'trainUnit',    // { role }               Phase 3 combat/support roles
+  AGE_UP: 'ageUp',            // { }                    Phase 3 advance one age
 };
 
 export const S2C = {
@@ -24,6 +26,7 @@ export const S2C = {
   CHAT_MSG: 'chatMsg',        // { pid, name, text }
   ERROR: 'error',             // { code, message }
   STARTED: 'started',
+  GAME_OVER: 'gameOver',      // { winner, reason }     Phase 3 castle destroyed
 };
 
 export function msg(type, data = {}) { return { t: type, ...data }; }

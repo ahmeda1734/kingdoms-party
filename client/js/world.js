@@ -17,6 +17,9 @@ export class World {
     this.fingerprint = 0;
     this.spawn = null;
     this.nodeHistory = []; // stock samples for per-minute rates
+    this.ages = new Map();     // pid -> 1..4
+    this.myAge = 1;
+    this.roleQueue = [];       // [{role, remaining, total}]
     this.stockHistory = []; // [{t, stocks}]
     this.buildings = new Map(); // id -> {id,owner,type,x,y,size,done,now}
     this.buildMode = null;      // building type string during placement
@@ -77,6 +80,7 @@ export class World {
     this.nodes.clear(); this.myWorkers.clear(); this.remoteUnits.clear();
     for (const n of p.nodes) this.nodes.set(n.id, { ...n });
     this.players.clear();
+    this.ages.clear(); this.myAge = 1; this.roleQueue = [];
     for (const pl of p.players) this.players.set(pl.id, pl);
     const spawn = p.spawns.find(s => s.pid === p.playerId);
     this.spawn = spawn ? { x: spawn.x, y: spawn.y } : null;
@@ -103,6 +107,8 @@ export class World {
       cur.prevX = cur.x; cur.prevY = cur.y;
       cur.x = u.x; cur.y = u.y;
       cur.owner = u.owner;
+      cur.type = u.type;
+      cur.hp = u.hp; cur.maxHp = u.maxHp;
       cur.tPrev = cur.tNow ?? performance.now();
       cur.tNow = performance.now();
       this.remoteUnits.set(u.id, cur);
@@ -116,6 +122,13 @@ export class World {
 
     if (s.buildings) this.applyBuildings(s.buildings);
     this.training = s.training ?? null;
+    this.roleQueue = s.roleQueue ?? [];
+    for (const id of s.unitsGone ?? []) {
+      this.myWorkers.delete(id);
+      this.remoteUnits.delete(id);
+    }
+    if (s.ages) this.ages = new Map(Object.entries(s.ages).map(([k, v]) => [Number(k), v]));
+    this.myAge = s.yourAge ?? this.ages.get(this.myPid) ?? 1;
 
     if (s.fog) rleInto(this.fog, s.fog);
 

@@ -2,7 +2,7 @@
 // drawn per frame only within the visible area. Zero image assets: everything
 // is drawn vector-cartoon style, so it scales cleanly on zoom.
 
-import { MAP_W, MAP_H, TILE, T, NODE, BUILDING, BUILDING_DEF } from '../../shared/constants.js';
+import { MAP_W, MAP_H, TILE, T, NODE, BUILDING, BUILDING_DEF, UNIT, ROLE_DEF } from '../../shared/constants.js';
 
 const CHUNK = 16; // tiles per chunk side
 const CHUNK_PX = CHUNK * TILE;
@@ -168,13 +168,13 @@ export class Renderer {
     // own workers
     for (const w of world.myWorkers.values()) {
       const sel = world.selection.has(w.id);
-      drawWorker(ctx, w.x, w.y, world.players.get(world.myPid)?.color ?? '#2f7de1', time, w.state, sel, w.carry, w.carryType);
+      drawWorker(ctx, w.x, w.y, world.players.get(world.myPid)?.color ?? '#2f7de1', time, w.state, sel, w.carry, w.carryType, w);
     }
     // other players' visible units
     for (const r of world.remoteUnits.values()) {
       const p = world.remotePos(r, now);
       if (p.x / TILE < vtx0 - 2 || p.x / TILE > vtx1 + 2 || p.y / TILE < vty0 - 2 || p.y / TILE > vty1 + 2) continue;
-      drawWorker(ctx, p.x, p.y, world.players.get(r.owner)?.color ?? '#999', time, 'remote', false, 0, null);
+      drawWorker(ctx, p.x, p.y, world.players.get(r.owner)?.color ?? '#999', time, 'remote', false, 0, null, r);
     }
 
     // selection rectangle
@@ -260,8 +260,8 @@ function roundRock(ctx, x, y, r) {
   ctx.closePath(); ctx.fill();
 }
 
-export function drawWorker(ctx, x, y, color, time, state, selected, carry, carryType) {
-  const moving = state === 'toNode' || state === 'toDepot' || state === 'move';
+export function drawWorker(ctx, x, y, color, time, state, selected, carry, carryType, unit) {
+  const moving = state === 'toNode' || state === 'toDepot' || state === 'move' || state === 'fight' || state === 'flee';
   const bob = moving ? Math.abs(Math.sin(time * 0.012)) * 3 : Math.sin(time * 0.003) * 0.8;
   ctx.save();
   ctx.translate(x, y - bob);
@@ -289,6 +289,19 @@ export function drawWorker(ctx, x, y, color, time, state, selected, carry, carry
     ctx.font = '9px serif';
     ctx.fillText(icons[carryType] ?? '📦', -5, -19);
   }
+  // Phase 3: role badge above military units + hp bar when wounded
+  if (unit?.type && unit.type !== UNIT.WORKER) {
+    ctx.font = '10px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(ROLE_DEF[unit.type]?.icon ?? '\u2694\ufe0f', 0, -21);
+  }
+  if (unit && typeof unit.hp === 'number' && unit.maxHp > 0 && unit.hp < unit.maxHp - 0.5) {
+    const frac = Math.max(0, unit.hp / unit.maxHp);
+    ctx.fillStyle = 'rgba(0,0,0,.45)';
+    ctx.fillRect(-9, -18, 18, 3);
+    ctx.fillStyle = frac > 0.35 ? '#62d26f' : '#e3543f';
+    ctx.fillRect(-9, -18, 18 * frac, 3);
+  }
   ctx.restore();
 }
 
@@ -300,6 +313,8 @@ const BUILDING_ICON = {
   [BUILDING.QUARRY]: { c: '#9aa3ab' },
   [BUILDING.GOLDMINE_B]: { c: '#f2c33b' },
   [BUILDING.BRICKFACTORY]: { c: '#c25b3a' },
+  [BUILDING.BARRACKS]: { c: '#8a5a33' },
+  [BUILDING.WATCHTOWER]: { c: '#7d868f' },
 };
 
 export function drawBuilding(ctx, b, world, time) {
@@ -373,6 +388,36 @@ function drawFinishedBuilding(ctx, type, px, py, size, color) {
     for (let r = 0; r < 4; r++) {
       ctx.beginPath(); ctx.moveTo(px + 6, py + 14 + r * 6); ctx.lineTo(px + s - 6, py + 14 + r * 6); ctx.stroke();
     }
+  } else if (type === BUILDING.BARRACKS) {
+    // wooden fort with a war banner
+    ctx.fillStyle = BUILDING_ICON[type].c;
+    ctx.fillRect(px + 4, py + 12, s - 8, s - 18);
+    ctx.fillStyle = '#6e4626';
+    ctx.fillRect(px + 4, py + 12, s - 8, 7);
+    ctx.fillStyle = '#5a4430';
+    ctx.fillRect(px + 10, py + s - 18, 12, 12);
+    ctx.fillStyle = '#fdf6e3';
+    ctx.fillRect(px + 10, py + 18, 7, 7);
+    ctx.fillRect(px + s - 18, py + 18, 7, 7);
+    ctx.strokeStyle = '#5a4430'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px + s / 2, py + 12); ctx.lineTo(px + s / 2, py - 4); ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,.3)';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath(); ctx.moveTo(px + 12 + i * (s - 24) / 2, py + 22); ctx.lineTo(px + 20 + i * (s - 24) / 2, py + s - 18); ctx.stroke();
+    }
+  } else if (type === BUILDING.WATCHTOWER) {
+    // grey stone tower, arrow slits + signal flame
+    ctx.fillStyle = '#7d868f';
+    ctx.fillRect(px + 10, py + 6, s - 20, s - 10);
+    ctx.fillStyle = '#666e77';
+    ctx.fillRect(px + 10, py + 6, s - 20, 6);
+    ctx.fillStyle = '#9aa3ab';
+    ctx.fillRect(px + 6, py + 2, s - 12, 8);
+    ctx.fillStyle = '#3a4048';
+    ctx.fillRect(px + s / 2 - 2, py + 14, 4, 8);
+    ctx.fillRect(px + s / 2 - 2, py + s - 18, 4, 8);
+    ctx.fillStyle = '#f2a33b';
+    ctx.beginPath(); ctx.arc(px + s / 2, py - 2 + Math.sin(time * 0.004) * 1.5, 3.5, 0, Math.PI * 2); ctx.fill();
   } else {
     // aura buildings: lumbermill / quarry / goldmine
     ctx.fillStyle = BUILDING_ICON[type]?.c ?? '#a9825f';

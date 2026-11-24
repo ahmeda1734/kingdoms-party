@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test test/sim.test.js test/net.test.js"
+    "test": "node --test test/sim.test.js test/net.test.js test/balance.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

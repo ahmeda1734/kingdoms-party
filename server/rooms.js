@@ -3,7 +3,7 @@
 
 import { WebSocket } from 'ws';
 import { randomBytes } from 'node:crypto';
-import { TICK_MS, SNAPSHOT_EVERY_TICKS, RECONNECT_GRACE_MS, MAP_W, MAP_H, T, WORKER, PLAYER_COLORS, MAX_PLAYERS, UNIT } from '../shared/constants.js';
+import { TICK_MS, SNAPSHOT_EVERY_TICKS, RECONNECT_GRACE_MS, MAP_W, MAP_H, T, WORKER, PLAYER_COLORS, MAX_PLAYERS, UNIT, TRAIN_WORKER } from '../shared/constants.js';
 import { generate, mapFingerprint, rleEncode } from '../shared/mapgen.js';
 import { Sim } from './sim.js';
 import { msg, S2C, C2S } from '../shared/protocol.js';
@@ -62,7 +62,7 @@ export class Rooms {
     const player = {
       pid, name: (name || 'Kingdom').slice(0, 20), token: randomBytes(12).toString('hex'),
       ws, connected: true, ready: false, lastSeen: Date.now(),
-      lastNodeAmounts: new Map(), lastFog: null,
+      lastNodeAmounts: new Map(), lastFog: null, lastDeathsTick: 0,
       color: PLAYER_COLORS[(pid - 1) % PLAYER_COLORS.length],
     };
     room.players.set(pid, player);
@@ -119,6 +119,14 @@ export class Rooms {
     const sim = room.sim;
     if (!sim) return;
     sim.update();
+    if (sim.over && room.state === 'playing') {
+      room.state = 'finished';
+      if (room.timer) { clearInterval(room.timer); room.timer = null; }
+      const payload = msg(S2C.GAME_OVER, sim.over);
+      for (const p of room.players.values()) {
+        if (p.ws && p.connected) p.ws.send(JSON.stringify(payload));
+      }
+    }
     if (sim.tick % SNAPSHOT_EVERY_TICKS !== 0) return;
     for (const p of room.players.values()) {
       if (p.connected && p.ws) this.sendSnapshot(room, p);
@@ -145,17 +153,23 @@ export class Rooms {
       }
     }
     const trainingQ = sim.trainingQueues.get(p.pid);
+    const roleQ = sim.unitQueues.get(p.pid) ?? [];
+    const deathsSince = sim.recentDeaths.filter(d => d.tick > (p.lastDeathsTick ?? 0));
+    p.lastDeathsTick = sim.tick;
     for (const u of sim.units.values()) {
       if (u.owner === p.pid) {
         yourWorkers.push({
           id: u.id, x: Math.round(u.x * 10) / 10, y: Math.round(u.y * 10) / 10,
           state: u.state, nodeId: u.nodeId, carry: Math.round(u.carry * 10) / 10,
-          carryType: u.carryType,
+          carryType: u.carryType, type: u.type,
+          hp: u.hp !== undefined ? Math.round(u.hp) : null,
+          maxHp: u.maxHp !== undefined ? Math.round(u.maxHp) : null,
         });
       } else {
         const tx = Math.floor(u.x / 32), ty = Math.floor(u.y / 32);
         if (fog[ty * MAP_W + tx] === 2) {
-          others.push({ id: u.id, owner: u.owner, x: Math.round(u.x), y: Math.round(u.y) });
+          others.push({ id: u.id, owner: u.owner, x: Math.round(u.x), y: Math.round(u.y),
+            type: u.type, hp: u.hp !== undefined ? Math.round(u.hp) : null });
         }
       }
     }
@@ -193,7 +207,11 @@ export class Rooms {
       t: S2C.SNAPSHOT,
       tick: sim.tick,
       stocks, yourWorkers, others, buildings,
-      training: trainingQ ? { remaining: trainingQ.remaining, total: 150 } : null,
+      training: trainingQ ? { remaining: trainingQ.remaining, total: TRAIN_WORKER.time } : null,
+      roleQueue: roleQ.map(q => ({ role: q.role, remaining: q.remaining, total: q.total })),
+      ages: Object.fromEntries(sim.age),
+      yourAge: sim.age.get(p.pid) ?? 1,
+      unitsGone: deathsSince.map(d => d.id),
       nodesChanged: changed, nodesDepleted: depleted,
       fog: fogPairs,
     }));
@@ -210,6 +228,8 @@ export class Rooms {
       case C2S.BUILD: sim.tryPlaceBuilding(player.pid, m.type, m.x, m.y); break;
       case C2S.ASSIGN_TO_BUILDING: sim.assignToBuilding(player.pid, m.workerIds ?? [], m.buildingId ?? 0); break;
       case C2S.TRAIN_WORKER: sim.trainWorker(player.pid); break;
+      case C2S.TRAIN_UNIT: sim.trainUnit(player.pid, m.role); break;
+      case C2S.AGE_UP: sim.ageUp(player.pid); break;
       default: break;
     }
   }

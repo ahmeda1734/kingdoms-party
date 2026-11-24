@@ -2,7 +2,7 @@
 // Clients send commands; this sim validates and applies them on ticks, then
 // the room broadcasts snapshots. Result: all players converge on the same world.
 
-import { TICK_MS, T, NODE, NODE_DEF, WORKER, BUILDING, BUILDING_DEF, TRAIN_WORKER, START_RESOURCES, START_WORKERS, MAP_W, MAP_H, TILE, UNIT } from '../shared/constants.js';
+import { TICK_MS, T, NODE, NODE_DEF, WORKER, BUILDING, BUILDING_DEF, TRAIN_WORKER, START_RESOURCES, START_WORKERS, MAP_W, MAP_H, TILE, UNIT, ROLE_DEF, AGES, MAX_AGE, AGE_STEP, AGE_MULT_MAX, COMBAT } from '../shared/constants.js';
 import { walkable } from '../shared/mapgen.js';
 
 const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
@@ -23,7 +23,13 @@ export class Sim {
     //                         done: tick when construction finishes or 0 }
     this.buildings = new Map();
     this.nextBuildingId = 1;
-    this.trainingQueues = new Map(); // pid -> { remaining: ticks }
+    this.trainingQueues = new Map(); // pid -> { remaining: ticks } (workers)
+    this.unitQueues = new Map();     // pid -> [{ role, remaining, total }]
+    this.age = new Map();            // pid -> 1..4
+    for (const pid of players.keys()) this.age.set(pid, 1);
+    this.over = null;                // { winner, reason } once a castle falls
+    this.recentDeaths = [];          // [{ id, tick }] for snapshot deltas
+    this.destroyedBuildings = [];    // [{ id, tick }]
     this._blockCache = null;
     // Per-player fog memory: 0 hidden, 1 explored-no-vision, 2 visible.
     this.fog = new Map();
@@ -33,6 +39,51 @@ export class Sim {
       for (let i = 0; i < START_WORKERS; i++) this.spawnWorker(pid);
       this.stampVision(pid, p.spawn[0], p.spawn[1], 9);
     }
+  }
+
+  // ---------- ages & roles (Phase 3) ----------
+
+  // +15% hp/dmg per age for MILITARY units, hard-capped by the GDD balance
+  // ceiling: late ages unlock options, they never unlock giants.
+  statMult(pid) {
+    return Math.min(1 + AGE_STEP * (this.age.get(pid) - 1), AGE_MULT_MAX);
+  }
+
+  ageUp(pid) {
+    if (!this.players.has(pid) || this.over) return false;
+    const cur = this.age.get(pid);
+    if (cur >= MAX_AGE) return false;
+    const next = AGES[cur + 1];
+    if (!next || !next.cost) return false;
+    if (next.cost.building) {
+      const req = next.cost.building;
+      const has = [...this.buildings.values()].some(b => b.owner === pid && b.type === req && this.completed(b));
+      if (!has) return false;
+    }
+    // resources only: the building requirement is a gate, never a stock check
+    const cost = Object.fromEntries(Object.entries(next.cost).filter(([k]) => k !== 'building'));
+    if (!this.canAfford(pid, cost)) return false;
+    this.pay(pid, cost);
+    this.age.set(pid, cur + 1);
+    // Reaching a new age never resolves the match (GDD §5).
+    return true;
+  }
+
+  trainUnit(pid, role) {
+    const def = ROLE_DEF[role];
+    if (!def || role === UNIT.WORKER || this.over) return false;
+    const { cap, units } = this.popCap(pid);
+    if (units >= cap) return false;
+    if (def.from === 'barracks') {
+      const hasBarracks = [...this.buildings.values()].some(b => b.owner === pid && b.type === BUILDING.BARRACKS && this.completed(b));
+      if (!hasBarracks) return false;
+    }
+    if (!this.canAfford(pid, def.cost)) return false;
+    this.pay(pid, def.cost);
+    const q = this.unitQueues.get(pid) ?? [];
+    q.push({ role, remaining: def.time, total: def.time });
+    this.unitQueues.set(pid, q);
+    return true;
   }
 
   // ---------- buildings ----------
@@ -91,6 +142,8 @@ export class Sim {
       id: this.nextBuildingId++, owner: pid, type,
       x: tx, y: ty, size,
       done: preplaced ? this.tick : this.tick + def.buildTime,
+      hp: def.hp, maxHp: def.hp,
+      lastAttacker: null,
     };
     this.buildings.set(b.id, b);
     this._blockCache = null;
@@ -139,17 +192,31 @@ export class Sim {
   }
 
   spawnWorker(pid) {
+    return this.spawnUnit(pid, UNIT.WORKER);
+  }
+
+  // Phase 3: every unit (worker or role) spawns at its kingdom's castle.
+  // Military stats get the age multiplier of the owning player at spawn time.
+  spawnUnit(pid, type) {
     const p = this.players.get(pid);
+    const def = type === UNIT.WORKER ? null : ROLE_DEF[type];
+    if (!type || (type !== UNIT.WORKER && !def)) return null;
     const id = this.nextUnitId++;
     const jitter = () => (Math.random() - 0.5) * 40;
+    const mult = this.statMult(pid);
     const unit = {
-      id, owner: pid, type: UNIT.WORKER,
+      id, owner: pid, type,
       x: p.spawn[0] * 32 + 16 + jitter(),
       y: (p.spawn[1] + 3) * 32 + 16 + jitter(), // below the castle footprint
-      state: 'idle',   // idle | toNode | gather | toBuilding | workFactory | toDepot
+      state: 'idle',   // idle | toNode | gather | toBuilding | workFactory | toDepot | fight | flee | heal | engineer
       path: [], nodeId: null, buildingId: null, carry: 0, carryType: null,
       gatherProgress: 0,
     };
+    const baseHp = type === UNIT.WORKER ? WORKER.hp : def.hp;
+    unit.maxHp = Math.round(baseHp * (type === UNIT.WORKER ? 1 : mult));
+    unit.hp = unit.maxHp;
+    unit.cd = 0;
+    unit.target = null; // { kind: 'unit'|'building', id } — military only
     // Nudge spawn position onto walkable, unblocked ground.
     const block = this.blockedGrid();
     let sx = Math.floor(unit.x / 32), sy = Math.floor(unit.y / 32);
@@ -254,6 +321,7 @@ export class Sim {
     const ids = new Set(workerIds);
     for (const u of this.units.values()) {
       if (!ids.has(u.id) || u.owner !== pid) continue;
+      if (u.type !== UNIT.WORKER) continue; // only workers gather
       const drop = this.dropPointFor(node, u.x, u.y);
       if (!drop) continue;
       const path = this.findPath(Math.floor(u.x / 32), Math.floor(u.y / 32), drop[0], drop[1]);
@@ -271,6 +339,7 @@ export class Sim {
     const ids = new Set(workerIds);
     for (const u of this.units.values()) {
       if (!ids.has(u.id) || u.owner !== pid) continue;
+      if (u.type !== UNIT.WORKER) continue; // only workers man factories
       const drop = this.dropPointForBuilding(b, u.x, u.y);
       if (!drop) continue;
       const path = this.findPath(Math.floor(u.x / 32), Math.floor(u.y / 32), drop[0], drop[1]);
@@ -342,11 +411,265 @@ export class Sim {
     this.decayVisible();
     for (const [pid, p] of this.players) {
       this.stampVision(pid, p.spawn[0], p.spawn[1], 9); // castle vision
-      for (const u of this.units.values()) {
-        if (u.owner === pid) {
-          this.stampVision(pid, Math.floor(u.x / 32), Math.floor(u.y / 32), WORKER.visionRadius);
+      for (const b of this.buildings.values()) {
+        if (b.owner === pid && BUILDING_DEF[b.type].vision && this.completed(b)) {
+          this.stampVision(pid, b.x + 1, b.y + 1, BUILDING_DEF[b.type].vision); // watchtower
         }
       }
+      for (const u of this.units.values()) {
+        if (u.owner === pid) {
+          const r = ROLE_DEF[u.type]?.vision ?? WORKER.visionRadius;
+          this.stampVision(pid, Math.floor(u.x / 32), Math.floor(u.y / 32), r);
+        }
+      }
+    }
+  }
+
+  // ---------- Phase 3: combat, healing, repairs, towers ----------
+
+  // Two-phase resolution: every valid attack is collected first, then applied.
+  // Simultaneous kills settle as true draws - no RNG, no map-order bias.
+  combatTick(dt) {
+    if (this.over) return;
+    const attacks = [];
+    for (const u of this.units.values()) {
+      if (u.type === UNIT.WORKER) continue;
+      const def = ROLE_DEF[u.type];
+      if (!def) continue;
+      if (u.cd > 0) u.cd--;
+      const tx = Math.floor(u.x / TILE), ty = Math.floor(u.y / TILE);
+
+      if (def.flee) {
+        const threat = this.nearestEnemyUnit(u, COMBAT.fleeRadius,
+          e => (ROLE_DEF[e.type]?.dmg ?? 0) > 0);
+        if (threat) {
+          u.state = 'flee';
+          u.repathT = (u.repathT ?? 0) - 1;
+          if (u.path.length === 0 || u.repathT <= 0) {
+            u.repathT = COMBAT.chaseRepathEvery;
+            const home = this.players.get(u.owner).spawn;
+            const path = this.findPath(tx, ty, home[0], home[1]);
+            u.path = path === null ? this.stepAway(u, threat) : path;
+          }
+          continue; // fleeing scouts never swing back
+        }
+      }
+
+      if (def.dmg > 0) {
+        let enemy = null;
+        if (u.target) {
+          enemy = u.target.kind === 'building'
+            ? this.buildings.get(u.target.id) : this.units.get(u.target.id);
+          if (enemy && enemy.owner === u.owner) enemy = null;
+        }
+        if (!enemy) {
+          enemy = this.nearestTarget(u);
+          u.target = enemy
+            ? { kind: enemy.size !== undefined ? 'building' : 'unit', id: enemy.id }
+            : null;
+        }
+        if (!enemy) {
+          if (u.state === 'fight') u.state = 'idle';
+          continue;
+        }
+        const isBuilding = enemy.size !== undefined;
+        const d = isBuilding ? this.edgeDistTiles(enemy, u.x, u.y)
+          : Math.hypot(enemy.x - u.x, enemy.y - u.y) / TILE;
+        u.state = 'fight';
+        if (d <= def.range + 0.35) {
+          if (u.cd <= 0) {
+            u.cd = def.attackEvery;
+            let dmg = def.dmg * this.statMult(u.owner);
+            if (!isBuilding) dmg *= def.bonusVs?.[enemy.type] ?? 1;
+            attacks.push({ from: u, enemy,
+              dmg: isBuilding ? dmg * COMBAT.buildingDmgMult : dmg });
+          }
+          if (def.kite && !isBuilding) {
+            const foe = this.nearestEnemyUnit(u, COMBAT.kiteRadius);
+            if (foe && u.path.length === 0) u.path = this.stepAway(u, foe);
+          }
+        } else {
+          u.repathT = (u.repathT ?? 0) - 1;
+          if (u.path.length === 0 || u.repathT <= 0) {
+            u.repathT = COMBAT.chaseRepathEvery;
+            if (isBuilding) {
+              const drop = this.dropPointForBuilding(enemy, u.x, u.y);
+              if (drop) {
+                const path = this.findPath(tx, ty, drop[0], drop[1]);
+                if (path !== null) u.path = path;
+              }
+            } else {
+              const path = this.findPath(tx, ty,
+                Math.floor(enemy.x / TILE), Math.floor(enemy.y / TILE));
+              if (path !== null) u.path = path;
+            }
+          }
+        }
+      } else if (def.repairPerSec) {
+        const b = this.nearestDamagedBuilding(u);
+        if (!b) {
+          if (u.state === 'engineer') u.state = 'idle';
+          continue;
+        }
+        u.state = 'engineer';
+        const d = this.edgeDistTiles(b, u.x, u.y);
+        if (d <= def.buildRange) {
+          u.path = [];
+          if (this.completed(b)) {
+            b.hp = Math.min(b.maxHp, b.hp + def.repairPerSec * dt);
+          }
+        } else {
+          u.repathT = (u.repathT ?? 0) - 1;
+          if (u.path.length === 0 || u.repathT <= 0) {
+            u.repathT = COMBAT.chaseRepathEvery;
+            const drop = this.dropPointForBuilding(b, u.x, u.y);
+            if (drop) {
+              const path = this.findPath(tx, ty, drop[0], drop[1]);
+              if (path !== null) u.path = path;
+            }
+          }
+        }
+      } else if (def.healPerSec) {
+        const ally = this.lowestHpAlly(u);
+        if (!ally) {
+          if (u.state === 'heal') u.state = 'idle';
+          continue;
+        }
+        u.state = 'heal';
+        const d = Math.hypot(ally.x - u.x, ally.y - u.y) / TILE;
+        if (d <= def.healRadius) {
+          u.path = [];
+          ally.hp = Math.min(ally.maxHp, ally.hp + def.healPerSec * dt);
+        } else {
+          u.repathT = (u.repathT ?? 0) - 1;
+          if (u.path.length === 0 || u.repathT <= 0) {
+            u.repathT = COMBAT.chaseRepathEvery;
+            const path = this.findPath(tx, ty,
+              Math.floor(ally.x / TILE), Math.floor(ally.y / TILE));
+            if (path !== null) u.path = path;
+          }
+        }
+      }
+    }
+
+    // Watchtowers return fire at the nearest enemy in range.
+    for (const b of this.buildings.values()) {
+      const def = BUILDING_DEF[b.type];
+      if (!def.dmg || !this.completed(b)) continue;
+      if ((b.cd ?? 0) > 0) { b.cd--; continue; }
+      const cx = (b.x + b.size / 2) * TILE, cy = (b.y + b.size / 2) * TILE;
+      let best = null, bd = def.range * TILE;
+      for (const e of this.units.values()) {
+        if (e.owner === b.owner) continue;
+        const d = Math.hypot(e.x - cx, e.y - cy);
+        if (d <= bd) { bd = d; best = e; }
+      }
+      if (best) {
+        b.cd = def.attackEvery;
+        attacks.push({ from: b, enemy: best, dmg: def.dmg * this.statMult(b.owner) });
+      }
+    }
+
+    for (const a of attacks) {
+      const tgt = a.enemy;
+      if (tgt.size !== undefined) {
+        if (!this.buildings.has(tgt.id)) continue;
+        tgt.hp -= a.dmg;
+        tgt.lastAttacker = a.from.owner;
+        if (tgt.hp <= 0) this.destroyBuilding(tgt);
+      } else {
+        if (!this.units.has(tgt.id)) continue;
+        tgt.hp -= a.dmg;
+        tgt.lastAttacker = a.from.owner;
+        if (tgt.hp <= 0) this.killUnit(tgt);
+      }
+    }
+  }
+
+  // distance in tiles from a point to the closest edge of a building footprint
+  edgeDistTiles(b, x, y) {
+    const ux = x / TILE, uy = y / TILE;
+    const dx = Math.max(b.x - ux, 0, ux - (b.x + b.size));
+    const dy = Math.max(b.y - uy, 0, uy - (b.y + b.size));
+    return Math.hypot(dx, dy);
+  }
+
+  nearestEnemyUnit(u, radiusTiles, filter) {
+    let best = null, bd = radiusTiles * TILE;
+    for (const e of this.units.values()) {
+      if (e.owner === u.owner) continue;
+      if (filter && !filter(e)) continue;
+      const d = Math.hypot(e.x - u.x, e.y - u.y);
+      if (d < bd) { bd = d; best = e; }
+    }
+    return best;
+  }
+
+  // Auto-aggro: enemy units first, then enemy buildings (castles, towers...).
+  nearestTarget(u) {
+    const unit = this.nearestEnemyUnit(u, COMBAT.aggroRadius);
+    if (unit) return unit;
+    let best = null, bd = Infinity;
+    for (const b of this.buildings.values()) {
+      if (b.owner === u.owner) continue;
+      const d = this.edgeDistTiles(b, u.x, u.y);
+      if (d <= COMBAT.aggroRadius + 0.5 && d < bd) { bd = d; best = b; }
+    }
+    return best;
+  }
+
+  // Deterministic retreat: the DIRS8 step with the best dot product away from
+  // the threat, onto walkable unblocked ground (no pathfinding needed).
+  stepAway(u, foe) {
+    let dx = u.x - foe.x, dy = u.y - foe.y;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len; dy /= len;
+    const block = this.blockedGrid();
+    let best = null, bestDot = -Infinity;
+    for (const [cx, cy] of DIRS8) {
+      const gx = Math.floor(u.x / TILE) + cx, gy = Math.floor(u.y / TILE) + cy;
+      if (!walkable(this.world.terrain, gx, gy) || block[gy * MAP_W + gx]) continue;
+      const dot = (cx * dx + cy * dy) / Math.hypot(cx, cy);
+      if (dot > bestDot) { bestDot = dot; best = [gx, gy]; }
+    }
+    return best ? [best[0] * TILE + 16, best[1] * TILE + 16] : [];
+  }
+
+  nearestDamagedBuilding(u) {
+    let best = null, bd = Infinity;
+    for (const b of this.buildings.values()) {
+      if (b.owner !== u.owner || b.hp >= b.maxHp) continue;
+      const d = Math.hypot((b.x + b.size / 2) * TILE - u.x,
+        (b.y + b.size / 2) * TILE - u.y);
+      if (d < bd) { bd = d; best = b; }
+    }
+    return best;
+  }
+
+  lowestHpAlly(u) {
+    let best = null, bestFrac = 1;
+    for (const a of this.units.values()) {
+      if (a.owner !== u.owner || a.id === u.id || a.hp >= a.maxHp) continue;
+      const frac = a.hp / a.maxHp;
+      if (frac < bestFrac) { bestFrac = frac; best = a; }
+    }
+    return best;
+  }
+
+  killUnit(u) {
+    this.units.delete(u.id);
+    this.recentDeaths.push({ id: u.id, tick: this.tick });
+    if (this.recentDeaths.length > 500) this.recentDeaths.splice(0, 200);
+  }
+
+  destroyBuilding(b) {
+    this.buildings.delete(b.id);
+    this._blockCache = null;
+    this.destroyedBuildings.push({ id: b.id, tick: this.tick });
+    if (b.type === BUILDING.CASTLE) {
+      const rivals = [...this.players.keys()].filter(p => p !== b.owner);
+      // Only a destroyed castle ends the match - never a reached age (GDD 5).
+      this.over = { winner: b.lastAttacker ?? rivals[0] ?? null, reason: 'castle_destroyed' };
     }
   }
 
@@ -369,7 +692,7 @@ export class Sim {
     this.tick++;
     const dt = TICK_MS / 1000;
 
-    // Training queues.
+    // Training queues (workers + Phase 3 roles).
     for (const [pid, q] of [...this.trainingQueues]) {
       q.remaining--;
       if (q.remaining <= 0) {
@@ -378,6 +701,18 @@ export class Sim {
         if (units < cap) this.spawnWorker(pid);
         // if the cap was lost meanwhile, the food is already spent — lesson not bug
       }
+    }
+    for (const [pid, queue] of [...this.unitQueues]) {
+      for (const item of queue) item.remaining--;
+      const done = queue.filter(q => q.remaining <= 0);
+      const rest = queue.filter(q => q.remaining > 0);
+      for (const item of done) {
+        const { cap, units } = this.popCap(pid);
+        if (units < cap) this.spawnUnit(pid, item.role);
+        else rest.push(item); // pop cap lost meanwhile: wait, don't waste the unit
+      }
+      if (rest.length) this.unitQueues.set(pid, rest);
+      else this.unitQueues.delete(pid);
     }
 
     // Farms: passive food production, clamped by the storage cap.
@@ -389,10 +724,10 @@ export class Sim {
       }
     }
 
-    // Movement along waypoint path.
+    // Movement along waypoint path (speed by role).
     for (const u of this.units.values()) {
       if (u.path.length === 0) continue;
-      let speed = WORKER.speed * dt;
+      let speed = (u.type === UNIT.WORKER ? WORKER.speed : ROLE_DEF[u.type].speed) * dt;
       while (speed > 0 && u.path.length > 0) {
         const [tx, ty] = u.path[0];
         const dist = Math.hypot(tx - u.x, ty - u.y);
@@ -407,6 +742,10 @@ export class Sim {
         }
       }
     }
+
+    // Phase 3: combat, healing, repairs, towers — after movement so retargeted
+    // units act from where they stand; then worker economy as before.
+    this.combatTick(dt);
 
     // Gather / build-work / deposit state machine.
     for (const u of this.units.values()) {

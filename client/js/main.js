@@ -7,7 +7,7 @@ import { Renderer } from './render.js';
 import { Input } from './input.js';
 import { UI } from './ui.js';
 import { S2C, C2S } from '../../shared/protocol.js';
-import { MAP_W, TILE, TRAIN_WORKER } from '../../shared/constants.js';
+import { MAP_W, TILE, TRAIN_WORKER, ROLE_DEF } from '../../shared/constants.js';
 
 const $ = id => document.getElementById(id);
 const lobby = $('lobby');
@@ -128,6 +128,16 @@ function onMessage(m) {
       box.scrollTop = box.scrollHeight;
       break;
     }
+    case S2C.GAME_OVER: {
+      const won = m.winner === myPid;
+      $('game-over-title').textContent = won ? '\U0001F3C6 \u0627\u0646\u062a\u0635\u0631\u062a \u0645\u0645\u0644\u0643\u062a\u0643!' : '\U0001F480 \u0633\u0642\u0637\u062a \u0642\u0644\u0639\u062a\u0643!';
+      const king = roomPlayers.find(p => p.pid === m.winner);
+      $('game-over-body').textContent = won
+        ? '\u062f\u0645\u0651\u0631\u062a \u0642\u0644\u0639\u0629 \u0627\u0644\u0645\u0645\u0644\u0643\u0629 \u0627\u0644\u0645\u0646\u0627\u0641\u0633\u0629 \u2014 \u0645\u0641\u0631\u0648\u062d \u0637\u0627\u062d\u0648\u0646\u0647 \u062a\u0641\u0648\u0642'
+        : '\u062f\u0645\u0651\u0631\u062a "' + (king?.name ?? '\u0645\u0645\u0644\u0643\u0629 \u063a\u064a\u0631 \u0645\u0639\u0631\u0648\u0641\u0629') + '" \u0642\u0644\u0639\u062a\u0643 \u2014 \u0627\u0646\u062a\u0647\u062a \u0627\u0644\u0645\u0628\u0627\u0631\u0627\u0629';
+      $('game-over-overlay').classList.remove('hidden');
+      break;
+    }
     case S2C.ERROR:
       clearTimeout(reconnectTimer);
       if (!world.ready) showError('⚠️ ' + (m.message ?? m.code));
@@ -194,6 +204,23 @@ document.querySelectorAll('[data-auto]').forEach(b => {
 // ---------- build menu / training wiring ----------
 ui.el.btnBuildMenu.addEventListener('click', () => {
   ui.setBuildMenuVisible(ui.el.buildMenu.classList.contains('hidden'));
+  ui.el.milMenu.classList.add('hidden');
+});
+ui.el.btnMilMenu.addEventListener('click', () => {
+  ui.el.milMenu.classList.toggle('hidden');
+  ui.setBuildMenuVisible(false);
+});
+ui.el.btnCloseMil.addEventListener('click', () => ui.el.milMenu.classList.add('hidden'));
+ui.onMilSelect = role => {
+  net?.send({ t: C2S.TRAIN_UNIT, role });
+  ui.flashMsg('\u23f3 \u062c\u0627\u0631\u064d \u062a\u062f\u0631\u064a\u0628 ' + (ROLE_DEF[role]?.name ?? role) + '\u2026');
+};
+$('btn-age-up').addEventListener('click', () => {
+  net?.send({ t: C2S.AGE_UP });
+  ui.flashMsg('\u2b06\ufe0f \u062c\u0627\u0631\u064a \u0645\u062d\u0627\u0648\u0644\u0629 \u0627\u0644\u0627\u0646\u062a\u0642\u0627\u0644 \u0644\u0644\u0639\u0635\u0631 \u0627\u0644\u062a\u0627\u0644\u064a\u2026');
+});
+$('btn-game-over-close').addEventListener('click', () => {
+  $('game-over-overlay').classList.add('hidden');
 });
 ui.el.btnCancelBuild.addEventListener('click', cancelBuildMode);
 ui.el.bpClose.addEventListener('click', () => ui.hideBuildingPanel());
@@ -246,7 +273,7 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 function updateTrainButton() {
-  if (!ui.trainButtonState() || ui.el.bp.classList.contains('hidden')) return;
+  if (ui.el.bp.classList.contains('hidden')) return;
   const s = world.stockFor(myPid) ?? {};
   const pop = world.myPop();
   const busy = !!world.training;

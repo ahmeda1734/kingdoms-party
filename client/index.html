@@ -106,6 +106,12 @@
         <div class="build-title">🏗️ البناء <button id="btn-cancel-build" class="btn small">✕ إلغاء</button></div>
         <div id="build-buttons"></div>
       </div>
+      <div id="military-menu" class="hidden">
+        <div class="build-title">⚔️ تدريب الوحدات <button id="btn-close-mil" class="btn small">✕ إغلاق</button></div>
+        <div id="military-buttons"></div>
+      </div>
+      <button id="btn-mil-menu" class="btn small">⚔️ قوات</button>
+      <button id="btn-age-up" class="btn small" disabled>⬆️ العصر</button>
       <button id="btn-build-menu" class="btn small">🏗️ بناء</button>
     </div>
 
@@ -123,6 +129,14 @@
     </div>
 
     <div id="connection-banner" class="hidden">⚠️ انقطع الاتصال… جاري إعادة المحاولة</div>
+  </div>
+
+  <div id="game-over-overlay" class="overlay hidden">
+    <div class="panel card gameover-card">
+      <h2 id="game-over-title">🏁</h2>
+      <p id="game-over-body"></p>
+      <button id="btn-game-over-close" class="btn primary">حسناً</button>
+    </div>
   </div>
 
   <script type="module" src="/js/main.js"></script>
